@@ -1,0 +1,125 @@
+#cloud-config
+coreos:
+  units:
+    - name: docker.service
+      command: start
+    - name: install-consul.service
+      command: start
+      content: |
+        [Unit]
+        Description=Install consul
+        [Service]
+        Type=oneshot
+        Environment="CONSUL_URL=https://releases.hashicorp.com/consul/0.6.4/consul_0.6.4_linux_amd64.zip"
+        Environment="DES=/opt/bin/consul"
+        ExecStartPre=-/bin/bash -c "mkdir -p /opt/bin/"
+        ExecStart=/bin/bash -c "if [ ! -f $DES ] ; then cd /tmp/ ; curl -sSL $CONSUL_URL -o consul.zip \
+          && unzip consul.zip && chmod a+x consul && mv consul $DES ; fi"
+    - name: consul.service
+      command: start
+      enable: true
+      content: |
+        [Unit]
+        Description=Consul
+        After=docker.service
+        Requires=docker.service
+        After=install-consul.service
+        Requires=install-consul.service
+
+        [Service]
+        EnvironmentFile=/etc/environment
+        TimeoutStartSec=0
+
+        ExecStart=/opt/bin/consul agent -config-file /etc/consul.d/consul.json
+
+        RestartSec=5
+        Restart=always
+    - name: install-nomad.service
+      command: start
+      content: |
+        [Unit]
+        Description=Install Nomad
+        [Service]
+        Type=oneshot
+        Environment="NOMAD_URL=https://releases.hashicorp.com/nomad/0.4.0/nomad_0.4.0_linux_amd64.zip"
+        Environment="DES_DIR=/opt/bin/"
+        ExecStart=/bin/bash -c "cd /tmp/ ; curl -sSL $NOMAD_URL -o nomad.zip && unzip nomad.zip && chmod a+x nomad \
+          && mkdir -p $DES_DIR && mv nomad $DES_DIR && mkdir -p /etc/nomad.d && chmod a+w /etc/nomad.d"
+    - name: nomad.service
+      command: start
+      enable: true
+      content: |
+        [Unit]
+        Description=Nomad
+        After=etcd2.service
+        Requires=etcd2.service
+        After=install-nomad.service
+        Requires=install-nomad.service
+
+        [Service]
+        EnvironmentFile=/etc/environment
+        TimeoutStartSec=0
+        ExecStart=/opt/bin/nomad agent -config /etc/nomad.d/client.hcl
+        RestartSec=5
+        Restart=always
+write_files:
+  - path: /etc/consul.d/consul.json
+    content: |
+      {
+        "datacenter": "os",
+        "data_dir": "/var/lib/data/consul",
+        "server": false,
+        "start_join": ["${consul_address}"],
+        "client_addr": "0.0.0.0",
+        "advertise_addr": "$private_ipv4",
+        "disable_update_check": true
+      }
+  - path: /etc/nomad.d/client.hcl
+    content: |
+      # Increase log verbosity
+      log_level = "DEBUG"
+      datacenter = "os"
+      region = "RegionOne"
+      bind_addr = "0.0.0.0"
+      data_dir = "/var/lib/data/nomad/"
+
+      advertise {
+        # We need to specify our host's IP because we can't
+        # advertise 0.0.0.0 to other nodes in our cluster.
+        http = "$private_ipv4:4646"
+        rpc = "$private_ipv4:4647"
+        serf = "$private_ipv4:4648"
+      }
+
+      client {
+        enabled = true
+        options {
+          "driver.raw_exec.enable" = "1"
+        }
+      }
+
+      consul {
+        token = "${consul_master_token}"
+      }
+
+      leave_on_interrupt = true
+      leave_on_terminate = true
+  - path: /etc/profile.d/alias.sh
+    content: |
+        alias lal="ls -al"
+        alias ll="ls -l"
+        alias sd="sudo systemctl"
+        alias sdl="sd list-units"
+        alias sds="sd status"
+        alias sdcat="sd cat"
+        alias j="sudo journalctl"
+        alias jfu="j -fu"
+        alias dk="docker"
+        alias dkc="dk ps"
+        alias dkm="dk images"
+        alias dki="dk inspect"
+        alias dkb="dk build"
+        alias dke="dk exec"
+        function dkip() { docker inspect --format "{{ .NetworkSettings.IPAddress }}" $1 ; }
+        function dkid() { docker inspect --format "{{ .ID }}" $1 ; }
+# end of files

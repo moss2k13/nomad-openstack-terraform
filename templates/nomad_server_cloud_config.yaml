@@ -1,0 +1,196 @@
+#cloud-config
+coreos:
+  etcd2:
+    # Discovery is populated by Terraform
+    discovery: ${etcd_discovery_url}
+    # $public_ipv4 and $private_ipv4 are populated by the cloud provider
+    # for vault, we only allows internal etcd clients
+    advertise-client-urls: http://$private_ipv4:2379
+    initial-advertise-peer-urls: http://$private_ipv4:2380
+    listen-client-urls: http://0.0.0.0:2379
+    listen-peer-urls: http://$private_ipv4:2380
+  fleet:
+    public-ip: "$private_ipv4"
+    metadata: "${fleet_tags}"
+  units:
+    - name: etcd2.service
+      command: start
+    - name: fleet.service
+      command: start
+    - name: docker.service
+      command: start
+    - name: install-consul.service
+      command: start
+      content: |
+        [Unit]
+        Description=Install consul
+        [Service]
+        Type=oneshot
+        Environment="CONSUL_URL=https://releases.hashicorp.com/consul/0.6.4/consul_0.6.4_linux_amd64.zip"
+        Environment="DES=/opt/bin/consul"
+        ExecStartPre=-/bin/bash -c "mkdir -p /opt/bin/"
+        ExecStart=/bin/bash -c "if [ ! -f $DES ] ; then cd /tmp/ ; curl -sSL $CONSUL_URL -o consul.zip \
+          && unzip consul.zip && chmod a+x consul && mv consul $DES ; fi"
+    - name: consul.service
+      command: start
+      enable: true
+      content: |
+        [Unit]
+        Description=Consul
+        After=etcd2.service
+        Requires=etcd2.service
+        After=docker.service
+        Requires=docker.service
+        After=install-consul.service
+        Requires=install-consul.service
+
+        [Service]
+        EnvironmentFile=/etc/environment
+        TimeoutStartSec=0
+
+        ExecStart=/opt/bin/bootstrap-consul $private_ipv4 %m
+
+        RestartSec=5
+        Restart=always
+    - name: install-nomad.service
+      command: start
+      content: |
+        [Unit]
+        Description=Install Nomad
+        After=etcd2.service
+        Requires=etcd2.service
+        After=docker.service
+        Requires=docker.service
+        After=consul.service
+        Requires=consul.service
+
+        [Service]
+        Type=oneshot
+        Environment="NOMAD_URL=https://releases.hashicorp.com/nomad/0.4.0/nomad_0.4.0_linux_amd64.zip"
+        Environment="DES_DIR=/opt/bin/"
+        ExecStart=/bin/bash -c "cd /tmp/ ; curl -sSL $NOMAD_URL -o nomad.zip && unzip nomad.zip && chmod a+x nomad \
+          && mkdir -p $DES_DIR && mv nomad $DES_DIR && mkdir -p /etc/nomad.d && chmod a+w /etc/nomad.d"
+    - name: nomad.service
+      command: start
+      enable: true
+      content: |
+        [Unit]
+        Description=Nomad
+        After=etcd2.service
+        Requires=etcd2.service
+        After=install-nomad.service
+        Requires=install-nomad.service
+
+        [Service]
+        EnvironmentFile=/etc/environment
+        TimeoutStartSec=0
+        ExecStart=-/opt/bin/nomad agent -config /etc/nomad.d/server.hcl
+        RestartSec=5
+        Restart=always
+write_files:
+  - path: /opt/bin/bootstrap-consul
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+
+      set -e
+
+      this_ip="$1"; shift
+      this_machine="$1"; shift
+      consul_args="$@"
+
+      function leave-cluster {
+        etcdctl rm /consul.io/bootstrap/machines/$this_machine || true
+        /opt/bin/consul leave || true
+      }
+
+      trap leave-cluster EXIT
+
+      etcdctl ls /consul.io/bootstrap/machines || etcdctl mkdir /consul.io/bootstrap/machines
+
+      nodes=( $(etcdctl ls /consul.io/bootstrap/machines) )
+
+      if [[ $${#nodes[@]} > 0 ]]; then
+        first_node=$${nodes[0]}
+        join_ip=$(etcdctl get $first_node)
+        join_arg="--join $join_ip"
+      fi
+
+      etcdctl set /consul.io/bootstrap/machines/$this_machine $this_ip > /dev/null
+
+      # https://www.consul.io/docs/agent/options.html
+      /opt/bin/consul agent -config-dir=/etc/consul.d -advertise $this_ip $join_arg $@
+  - path: /etc/consul.d/consul.json
+    content: |
+      {
+        "datacenter": "os",
+        "data_dir": "/var/lib/data/consul",
+        "server": true,
+        "ui": true,
+        "bootstrap_expect": ${cluster_size},
+        "client_addr": "0.0.0.0",
+        "recursors": ["8.8.8.8"],
+        "disable_update_check": true,
+        "acl_datacenter": "os",
+        "acl_master_token": "${consul_master_token}"
+      }
+  - path: /etc/nomad.d/server.hcl
+    content: |
+      # Increase log verbosity
+      log_level = "DEBUG"
+      datacenter = "os"
+      region = "RegionOne"
+      bind_addr = "0.0.0.0"
+      data_dir = "/var/lib/data/nomad"
+
+      advertise {
+        # We need to specify our host's IP because we can't
+        # advertise 0.0.0.0 to other nodes in our cluster.
+        http = "$private_ipv4:4646"
+        rpc = "$private_ipv4:4647"
+        serf = "$private_ipv4:4648"
+      }
+
+      # Enable the server
+      server {
+          enabled = true
+          # Self-elect, should be 3 or 5 for production
+          bootstrap_expect = ${cluster_size}
+      }
+
+      consul {
+        token = "${consul_master_token}"
+      }
+
+      leave_on_interrupt = true
+      leave_on_terminate = true
+  - path: /etc/profile.d/alias.sh
+    content: |
+        alias lal="ls -al"
+        alias ll="ls -l"
+        alias sd="sudo systemctl"
+        alias sdl="sd list-units"
+        alias sds="sd status"
+        alias sdcat="sd cat"
+        alias j="sudo journalctl"
+        alias jfu="j -f -u"
+        alias e="etcdctl"
+        alias els="e ls --recursive"
+        alias eget="e get"
+        alias eset="e set"
+        alias eok='e cluster-health'
+        alias f="fleetctl -strict-host-key-checking=false"
+        alias fcat="f cat"
+        alias fss="f status"
+        alias fst="f start"
+        alias fdy="f destroy"
+        alias flm="f list-machines"
+        alias dk="docker"
+        alias dkc="dk ps"
+        alias dkm="dk images"
+        alias dki="dk inspect"
+        alias dkb="dk build"
+        alias dke="dk exec"
+        function dkip() { docker inspect --format "{{ .NetworkSettings.IPAddress }}" $1 ; }
+        function dkid() { docker inspect --format "{{ .ID }}" $1 ; }
+# end of files
