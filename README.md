@@ -1,6 +1,9 @@
 # Nomad on CoreOS terraformed on OpenStack
 
-Based on [xuwang/gcp-nomad](https://github.com/xuwang/gcp-nomad) and [paulczar/terraform-kubernetes-openstack](https://github.com/paulczar/terraform-kubernetes-openstack)
+Based on:
+- [xuwang/gcp-nomad](https://github.com/xuwang/gcp-nomad)
+- [paulczar/terraform-kubernetes-openstack](https://github.com/paulczar/terraform-kubernetes-openstack)
+- [Sander Knape blog](https://sanderknape.com/2016/08/nomad-consul-multi-datacenter-container-orchestration)
 
 ## Status
 
