@@ -9,7 +9,7 @@ Based on:
 
 Ready for testing. By default it will install 3 nomad servers (m1.small) and 2 nomad clients (m1.large).
 
-Verified on below versions:
+Verified with below versions:
 - nomad 0.4.0
 - consul 0.6.4
 - coreos 1122.2
